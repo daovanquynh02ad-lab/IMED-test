@@ -12,9 +12,27 @@ let accessPollTimer = null;
 let isCheckingAccess = false;
 
 let searchDebounceTimer = null;
+let saveDebounceTimer = null;
 let learnObserver = null;
 
 const tg = window.Telegram ? window.Telegram.WebApp : null;
+
+function updateTgTopInset() {
+    try {
+        if (tg && tg.contentSafeAreaInset && typeof tg.contentSafeAreaInset.top === 'number') {
+            const safeTop = (tg.safeAreaInset && typeof tg.safeAreaInset.top === 'number') ? tg.safeAreaInset.top : 0;
+            const totalTop = safeTop + tg.contentSafeAreaInset.top;
+            if (totalTop > 0) {
+                document.documentElement.style.setProperty('--tg-top', `max(0px, calc(${totalTop}px - env(safe-area-inset-top)))`);
+                return;
+            }
+            if (!tg.isFullscreen) {
+                document.documentElement.style.setProperty('--tg-top', '12px');
+                return;
+            }
+        }
+    } catch(e) {}
+}
 
 try { 
     if (tg) {
@@ -23,6 +41,12 @@ try {
         try { tg.requestFullscreen(); } catch(e){}
         if(tg.isVerticalSwipesEnabled!==undefined) tg.isVerticalSwipesEnabled=false; 
         tg.setHeaderColor('#ffffff'); 
+        updateTgTopInset();
+        if (tg.onEvent) {
+            tg.onEvent('contentSafeAreaChanged', updateTgTopInset);
+            tg.onEvent('safeAreaChanged', updateTgTopInset);
+            tg.onEvent('fullscreenChanged', updateTgTopInset);
+        }
     }
 } catch(e){}
 
@@ -85,9 +109,26 @@ function saveProgressToCloud() {
     persistLocal();
 }
 
+function debouncedSaveProgress() {
+    clearTimeout(saveDebounceTimer);
+    saveDebounceTimer = setTimeout(() => {
+        saveDebounceTimer = null;
+        saveProgressToCloud();
+    }, 300);
+}
+
+function flushPendingSave() {
+    if (saveDebounceTimer) {
+        clearTimeout(saveDebounceTimer);
+        saveDebounceTimer = null;
+        saveProgressToCloud();
+    }
+}
+
 function switchColloquium(colNum) {
     if (state.activeColloquium === colNum) return;
     haptic('medium');
+    flushPendingSave();
     persistLocal();
     state.activeColloquium = colNum;
     try { localStorage.setItem('imed_pathophys_active_col', String(colNum)); } catch(e) {}
@@ -113,6 +154,7 @@ document.addEventListener('touchstart', (e)=>{if(e.touches[0].clientX<40){window
 document.addEventListener('touchend', (e)=>{if(!window.sw)return;const ex=e.changedTouches[0].clientX;const ey=e.changedTouches[0].clientY;if((ex-window.sx)>60 && Math.abs(ey-window.sy)<50 && state.view!=='menu' && !state.showFilterModal && !state.showResetModal && !state.showConfirmResetDialog){haptic('medium');goHome();}window.sw=false},{passive:true});
 
 function escapeHtml(t) { if(!t)return""; return t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function normSearch(t) { return String(t || '').toLowerCase().replace(/ё/g, 'е'); }
 
 function getActiveRawData() {
     if (state.activeColloquium === 2 && typeof RAW_PATHOPHYS_COL2_QUESTIONS !== 'undefined' && typeof TOPIC_RANGES_COL2 !== 'undefined') {
@@ -145,7 +187,7 @@ function processQuestions() {
             options: oText, 
             correctIndices: q.c, 
             image: null,
-            searchString: (qText + ' ' + oText.join(' ') + ' ' + cleanTopic).toLowerCase()
+            searchString: normSearch((q.q || '') + ' ' + (q.o || []).join(' ') + ' ' + cleanTopic)
         };
     });
     availableTopics = [...new Set(QUESTIONS_DATA.map(q => q.topic))];
@@ -153,13 +195,6 @@ function processQuestions() {
         state.selectedTopics = [...availableTopics];
     } else {
         state.selectedTopics = state.selectedTopics.filter(t => availableTopics.includes(t));
-        if (state.activeColloquium === 1) {
-            const oldTopics = availableTopics.slice(0, 7);
-            const hadAllOldSelected = oldTopics.every(t => state.selectedTopics.includes(t));
-            if (hadAllOldSelected && state.selectedTopics.length === 7) {
-                state.selectedTopics = [...availableTopics];
-            }
-        }
         if (state.selectedTopics.length === 0) {
             state.selectedTopics = [...availableTopics];
         }
@@ -176,31 +211,22 @@ function clearProtectedContent() {
 
 function getTelegramUserId() {
     try {
-        if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initDataUnsafe && window.Telegram.WebApp.initDataUnsafe.user) {
-            return window.Telegram.WebApp.initDataUnsafe.user.id;
+        if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.id) {
+            return tg.initDataUnsafe.user.id;
         }
     } catch (e) {}
 
-    const parseUserFromStr = (str) => {
-        try {
-            if (!str) return null;
-            const params = new URLSearchParams(str);
+    try {
+        if (tg && tg.initData) {
+            const params = new URLSearchParams(tg.initData);
             const userStr = params.get('user');
-            if (userStr) return JSON.parse(userStr).id;
-            let tgWebAppData = params.get('tgWebAppData');
-            if (tgWebAppData) {
-                tgWebAppData = decodeURIComponent(tgWebAppData);
-                const subParams = new URLSearchParams(tgWebAppData);
-                const subUser = subParams.get('user');
-                if (subUser) return JSON.parse(subUser).id;
+            if (userStr) {
+                const parsed = JSON.parse(userStr);
+                if (parsed && parsed.id) return parsed.id;
             }
-        } catch (e) {}
-        return null;
-    };
+        }
+    } catch (e) {}
 
-    try { if (tg && tg.initData) { const id = parseUserFromStr(tg.initData); if (id) return id; } } catch (e) {}
-    try { let hash = window.location.hash; if (hash.startsWith('#')) hash = hash.substring(1); const idHash = parseUserFromStr(hash); if (idHash) return idHash; } catch (e) {}
-    try { let search = window.location.search; if (search.startsWith('?')) search = search.substring(1); const idSearch = parseUserFromStr(search); if (idSearch) return idSearch; } catch (e) {}
     return null;
 }
 
@@ -237,15 +263,16 @@ async function performAccessCheck() {
     try { localStorage.removeItem(`imed_pathophys_col1_access_${currentUserId}`); } catch(e) {}
 
     isCheckingAccess = true;
-    const tgUser = (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initDataUnsafe && window.Telegram.WebApp.initDataUnsafe.user) || {};
+    const tgUser = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) || {};
     const uName = encodeURIComponent(tgUser.first_name || "Студент");
     const uHandle = encodeURIComponent(tgUser.username || "");
+    const rawInitData = (tg && tg.initData) ? tg.initData : "";
 
     try {
         const ctrl = new AbortController();
         const tid = setTimeout(() => ctrl.abort(), 10000);
         const res = await fetch(
-            `${GOOGLE_SCRIPT_URL}?mode=check&userId=${encodeURIComponent(currentUserId)}&name=${uName}&username=${uHandle}&_t=${Date.now()}`,
+            `${GOOGLE_SCRIPT_URL}?mode=check&userId=${encodeURIComponent(currentUserId)}&name=${uName}&username=${uHandle}&initData=${encodeURIComponent(rawInitData)}&_t=${Date.now()}`,
             { signal: ctrl.signal, cache: 'no-store' }
         );
         clearTimeout(tid);
@@ -363,15 +390,39 @@ function startAccessPolling() {
 function initApp() { state.resumeState = null; render(); }
 
 function toggleTheme() {
-    haptic('light'); state.isDark = !state.isDark;
-    const body=document.documentElement, auth=document.getElementById('auth-screen'), block=document.getElementById('block-screen');
-    if(state.isDark) { body.classList.add('dark'); if(auth)auth.style.backgroundColor='#000'; if(block)block.style.backgroundColor='#000'; try{if(tg)tg.setHeaderColor('#000000');}catch(e){} }
-    else { body.classList.remove('dark'); if(auth)auth.style.backgroundColor='#fff'; if(block)block.style.backgroundColor='#fff'; try{if(tg)tg.setHeaderColor('#ffffff');}catch(e){} }
-    render();
+    haptic('light');
+    state.isDark = !state.isDark;
+    const root = document.documentElement;
+    const auth = document.getElementById('auth-screen');
+    const block = document.getElementById('block-screen');
+    const logo = document.getElementById('app-logo');
+
+    if (state.isDark) {
+        root.classList.add('dark');
+        if (auth) auth.style.backgroundColor = '#000';
+        if (block) block.style.backgroundColor = '#000';
+        if (logo) logo.src = "https://i.ibb.co/tw2sGMTs/image.png";
+        try { if (tg) tg.setHeaderColor('#000000'); } catch(e) {}
+    } else {
+        root.classList.remove('dark');
+        if (auth) auth.style.backgroundColor = '#fff';
+        if (block) block.style.backgroundColor = '#fff';
+        if (logo) logo.src = "https://i.ibb.co/zWn4xWnk/image.png";
+        try { if (tg) tg.setHeaderColor('#ffffff'); } catch(e) {}
+    }
 }
 
-function toggleFilterModal(show) { if(show)haptic('light'); state.showFilterModal=show; render(); }
-function toggleResetModal(show) { if(show) { haptic('light'); state.resetSelectedTopics = []; } state.showResetModal=show; render(); }
+function toggleFilterModal(show) {
+    if (show) haptic('light');
+    else flushPendingSave();
+    state.showFilterModal = show;
+    render();
+}
+function toggleResetModal(show) {
+    if (show) { haptic('light'); state.resetSelectedTopics = []; }
+    state.showResetModal = show;
+    render();
+}
 
 function toggleShuffle() { 
     haptic('light'); 
@@ -393,26 +444,50 @@ function toggleShuffle() {
     }
 }
 
-function toggleTopic(t) { 
-    if(state.selectedTopics.includes(t)) state.selectedTopics=state.selectedTopics.filter(x=>x!==t); 
-    else state.selectedTopics.push(t); 
-    if(state.showFilterModal) { updateTopicListUI('filter'); updateSelectAllButtonUI('filter'); } else render();
-    saveProgressToCloud();
-}
-function toggleSelectAllTopics() { 
-    haptic('medium'); if(state.selectedTopics.length===availableTopics.length) state.selectedTopics=[]; else state.selectedTopics=[...availableTopics]; 
-    if(state.showFilterModal){updateTopicListUI('filter');updateSelectAllButtonUI('filter');} else render(); 
-    saveProgressToCloud();
+function toggleTopicByIndex(idx) {
+    const t = availableTopics[idx];
+    if (t === undefined) return;
+    haptic('light');
+    if (state.selectedTopics.includes(t)) state.selectedTopics = state.selectedTopics.filter(x => x !== t);
+    else state.selectedTopics.push(t);
+    if (state.showFilterModal) {
+        updateTopicListUI('filter');
+        updateSelectAllButtonUI('filter');
+    } else {
+        render();
+    }
+    debouncedSaveProgress();
 }
 
-function toggleResetTopic(t) { 
-    if(state.resetSelectedTopics.includes(t)) state.resetSelectedTopics=state.resetSelectedTopics.filter(x=>x!==t); 
-    else state.resetSelectedTopics.push(t); 
-    updateTopicListUI('reset'); updateSelectAllButtonUI('reset');
+function toggleSelectAllTopics() { 
+    haptic('light');
+    if (state.selectedTopics.length === availableTopics.length) state.selectedTopics = [];
+    else state.selectedTopics = [...availableTopics];
+    if (state.showFilterModal) {
+        updateTopicListUI('filter');
+        updateSelectAllButtonUI('filter');
+    } else {
+        render();
+    }
+    debouncedSaveProgress();
 }
+
+function toggleResetTopicByIndex(idx) {
+    const t = availableTopics[idx];
+    if (t === undefined) return;
+    haptic('light');
+    if (state.resetSelectedTopics.includes(t)) state.resetSelectedTopics = state.resetSelectedTopics.filter(x => x !== t);
+    else state.resetSelectedTopics.push(t);
+    updateTopicListUI('reset');
+    updateSelectAllButtonUI('reset');
+}
+
 function toggleSelectAllReset() { 
-    haptic('medium'); if(state.resetSelectedTopics.length===availableTopics.length) state.resetSelectedTopics=[]; else state.resetSelectedTopics=[...availableTopics]; 
-    updateTopicListUI('reset'); updateSelectAllButtonUI('reset'); 
+    haptic('light');
+    if (state.resetSelectedTopics.length === availableTopics.length) state.resetSelectedTopics = [];
+    else state.resetSelectedTopics = [...availableTopics];
+    updateTopicListUI('reset');
+    updateSelectAllButtonUI('reset');
 }
 
 function confirmReset() { if(!state.resetSelectedTopics.length) { haptic('error'); return; } haptic('warning'); state.showResetModal = false; state.showConfirmResetDialog = true; render(); }
@@ -438,50 +513,71 @@ function updateTopicListUI(mode) {
     const list = document.getElementById(listId); if(!list) return;
     const selectedArr = mode === 'filter' ? state.selectedTopics : state.resetSelectedTopics;
 
-    const stats = {};
-    if (mode === 'filter') {
-        QUESTIONS_DATA.forEach(q => {
-            if (!stats[q.topic]) stats[q.topic] = { total: 0, correct: 0 };
-            stats[q.topic].total++;
-            if (state.userProgress && state.userProgress[q.id]?.status === 'correct') stats[q.topic].correct++;
-        });
-    }
-
-    list.querySelectorAll('button[data-topic]').forEach(btn => {
-        const t = btn.getAttribute('data-topic');
+    list.querySelectorAll('button.topic-btn[data-i]').forEach(btn => {
+        const idx = Number(btn.getAttribute('data-i'));
+        const t = availableTopics[idx];
         const sel = selectedArr.includes(t);
-        const icon = btn.querySelector('.icon-area');
-        
-        let btnClass = "w-full text-left px-4 py-3 rounded-xl font-bold text-sm flex flex-col gap-1 group btn-click relative";
-        let progressHtml = '';
-        if (mode === 'filter' && stats[t]) {
-            const { total, correct } = stats[t];
-            const progress = total > 0 ? Math.round((correct / total) * 100) : 0;
-            let barBg = sel ? 'bg-white/20 dark:bg-black/20' : 'bg-slate-200 dark:bg-slate-700';
-            let fillBg = sel ? 'bg-emerald-400 dark:bg-emerald-600' : 'bg-emerald-500';
-            let txtColor = sel ? 'text-white/60 dark:text-black/60' : 'text-slate-400';
-            progressHtml = `<div class="w-full h-1.5 ${barBg} rounded-full mt-2 overflow-hidden"><div class="h-full ${fillBg} rounded-full" style="width: ${progress}%"></div></div><div class="text-[10px] ${txtColor} mt-1 flex justify-between"><span>Прогресс (${correct}/${total})</span><span>${progress}%</span></div>`;
-        }
 
-        if(sel) { btnClass += " bg-black text-white dark:bg-white dark:text-black border border-transparent"; if(icon) icon.innerHTML='<i data-lucide="check-circle" class="w-4 h-4 absolute top-3 right-3 text-emerald-400 dark:text-emerald-600"></i>'; } 
-        else { btnClass += " bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 relative"; if(icon) icon.innerHTML=''; }
-        btn.className = btnClass;
-        const contentDiv = btn.querySelector('.topic-content');
-        if(contentDiv) contentDiv.innerHTML = `<span class="block text-wrap leading-tight pr-6 mb-1">${t}</span> ${progressHtml}`;
+        btn.classList.toggle('bg-black', sel);
+        btn.classList.toggle('text-white', sel);
+        btn.classList.toggle('dark:bg-white', sel);
+        btn.classList.toggle('dark:text-black', sel);
+        btn.classList.toggle('border-transparent', sel);
+
+        btn.classList.toggle('bg-white', !sel);
+        btn.classList.toggle('dark:bg-slate-900', !sel);
+        btn.classList.toggle('border-slate-200', !sel);
+        btn.classList.toggle('dark:border-slate-700', !sel);
+        btn.classList.toggle('text-slate-700', !sel);
+        btn.classList.toggle('dark:text-slate-300', !sel);
+
+        const checkIcon = btn.querySelector('.topic-check-icon');
+        if (checkIcon) checkIcon.classList.toggle('hidden', !sel);
+
+        if (mode === 'filter') {
+            const barBg = btn.querySelector('.topic-bar-bg');
+            const fillBg = btn.querySelector('.topic-fill-bg');
+            const txtColor = btn.querySelector('.topic-progress-txt');
+
+            if (barBg) {
+                barBg.classList.toggle('bg-white/20', sel);
+                barBg.classList.toggle('dark:bg-black/20', sel);
+                barBg.classList.toggle('bg-slate-200', !sel);
+                barBg.classList.toggle('dark:bg-slate-700', !sel);
+            }
+            if (fillBg) {
+                fillBg.classList.toggle('bg-emerald-400', sel);
+                fillBg.classList.toggle('dark:bg-emerald-600', sel);
+                fillBg.classList.toggle('bg-emerald-500', !sel);
+            }
+            if (txtColor) {
+                txtColor.classList.toggle('text-white/60', sel);
+                txtColor.classList.toggle('dark:text-black/60', sel);
+                txtColor.classList.toggle('text-slate-400', !sel);
+            }
+        }
     });
     
-    if (mode === 'filter') updateSelectAllButtonUI('filter');
-    
     const apply = document.getElementById(mode === 'filter' ? 'apply-btn' : 'confirm-reset-btn'); 
-    if(apply) apply.innerText = mode === 'filter' ? `Применить (${selectedArr.length})` : `Сбросить (${selectedArr.length})`;
-    safeIcons();
+    if(apply) apply.textContent = mode === 'filter' ? `Применить (${selectedArr.length})` : `Сбросить (${selectedArr.length})`;
 }
 
 function updateSelectAllButtonUI(mode) {
     const btn = document.getElementById(mode === 'filter' ? 'select-all-btn' : 'reset-select-all-btn'); if(!btn) return;
     const all = (mode === 'filter' ? state.selectedTopics : state.resetSelectedTopics).length === availableTopics.length;
-    btn.innerHTML=`<span>${all?'Снять все':'Выбрать все'}</span><i data-lucide="${all?'trash-2':'layers'}" class="w-4 h-4"></i>`;
-    safeIcons();
+    const label = btn.querySelector('.select-all-label');
+    const iconClear = btn.querySelector('.icon-clear-all');
+    const iconSelect = btn.querySelector('.icon-select-all');
+    if (label) label.textContent = all ? 'Снять все' : 'Выбрать все';
+    if (iconClear) iconClear.classList.toggle('hidden', !all);
+    if (iconSelect) iconSelect.classList.toggle('hidden', all);
+}
+
+function showAppAlert(msg) {
+    if (tg && tg.showAlert) {
+        try { tg.showAlert(msg); return; } catch(e) {}
+    }
+    alert(msg);
 }
 
 function startMode(mode, resume=false) {
@@ -492,7 +588,7 @@ function startMode(mode, resume=false) {
     if (USE_AUTH) performAccessCheck();
 
     haptic('medium');
-    if(resume && (!state.playableQuestions || state.playableQuestions.length === 0)) resume = false;
+    if(resume && (!state.resumeState || !state.resumeState.questions || state.resumeState.questions.length === 0)) resume = false;
     if(resume && state.resumeState?.mode===mode){ state.playableQuestions = state.resumeState.questions; state.currentQuestionIndex = state.resumeState.index; state.view=mode; state.quizFinished=false; loadStateForIndex(state.currentQuestionIndex); render(); return; }
     
     let q;
@@ -514,7 +610,7 @@ function startMode(mode, resume=false) {
             render();
             return;
         }
-        alert("Выберите хотя бы одну тему в фильтре!"); 
+        showAppAlert("Выберите хотя бы одну тему в фильтре!"); 
         return; 
     }
     
@@ -523,6 +619,10 @@ function startMode(mode, resume=false) {
         state.filteredLearnQuestions = q;
         state.learnRenderLimit = 25;
         state.searchCurrentIndex = -1;
+        state.playableQuestions = q;
+        state.view = 'learn';
+        render();
+        return;
     }
 
     if((mode==='quiz'||mode==='cards') && state.isShuffleEnabled) q = [...q].sort(()=>Math.random()-0.5);
@@ -545,8 +645,17 @@ function loadStateForIndex(i) {
 }
 
 function handleOptionSelect(idx) {
-    if(state.isAnswerChecked) return; haptic('light');
-    if(state.selectedOptions.includes(idx)) state.selectedOptions=state.selectedOptions.filter(x=>x!==idx); else state.selectedOptions.push(idx);
+    if(state.isAnswerChecked) return;
+    haptic('light');
+    const q = state.playableQuestions[state.currentQuestionIndex];
+    const isSingle = q && q.correctIndices.length === 1;
+    if (isSingle) {
+        if (state.selectedOptions.includes(idx)) state.selectedOptions = [];
+        else state.selectedOptions = [idx];
+    } else {
+        if (state.selectedOptions.includes(idx)) state.selectedOptions = state.selectedOptions.filter(x => x !== idx);
+        else state.selectedOptions.push(idx);
+    }
     render();
 }
 function checkAnswer() {
@@ -584,10 +693,17 @@ function prevQuestion() {
     render();
 }
 function goHome() {
-    haptic('medium'); saveProgressToCloud();
+    haptic('medium');
+    flushPendingSave();
+    saveProgressToCloud();
     if (USE_AUTH) performAccessCheck();
-    if(['quiz','cards','mistakes'].includes(state.view) && !state.quizFinished && state.playableQuestions.length) state.resumeState={mode:state.view, index:state.currentQuestionIndex, questions:state.playableQuestions};
-    else state.resumeState=null;
+    if (['quiz','cards','mistakes'].includes(state.view)) {
+        if (!state.quizFinished && state.playableQuestions.length) {
+            state.resumeState = { mode: state.view, index: state.currentQuestionIndex, questions: state.playableQuestions };
+        } else {
+            state.resumeState = null;
+        }
+    }
     state.view='menu'; render();
 }
 
@@ -611,7 +727,7 @@ function handleSearchInput(val) {
         state.learnRenderLimit = 25;
         state.searchCurrentIndex = -1;
         
-        const trimmed = val.trim().toLowerCase();
+        const trimmed = normSearch(val.trim());
         
         if (!trimmed) {
             state.filteredLearnQuestions = state.playableQuestions;
@@ -681,7 +797,7 @@ function scrollToCurrentMatch() {
 
 function highlightText(text, query) {
     if (!query || !query.trim()) return text;
-    const words = query.trim().split(/\s+/).filter(w => w.length > 0).map(escapeRegExp);
+    const words = query.trim().split(/\s+/).filter(w => w.length > 0).map(w => escapeRegExp(w).replace(/[её]/gi, '[её]'));
     const re = new RegExp('(' + words.join('|') + ')', 'gi');
     return text.split(/(&(?:amp|lt|gt|quot|#\d+);)/).map((part, i) =>
         i % 2 === 1 ? part : part.replace(re, '<mark>$1</mark>')
@@ -712,8 +828,7 @@ function renderLearnList() {
             <div class="divide-y divide-black dark:divide-slate-800">
                 ${q.options.map((opt, i) => {
                     if(!opt||!opt.trim())return'';
-                    const cleanOpt = opt.replace(/^[\d]+[).]\s*/, '');
-                    const optHtml = state.searchQuery ? highlightText(cleanOpt, state.searchQuery) : cleanOpt;
+                    const optHtml = state.searchQuery ? highlightText(opt, state.searchQuery) : opt;
                     const isC = q.correctIndices.includes(i); 
                     let bgClass = "bg-white dark:bg-black text-black dark:text-slate-300";
                     if(isC) bgClass += " correct-answer";
@@ -746,8 +861,15 @@ function render() {
         return;
     }
     const app=document.getElementById('app');
-    let scrollTop=0; const cd=document.querySelector('.layout-content');
-    if(cd && app.dataset.view===state.view) scrollTop=cd.scrollTop;
+    const sameView = app.dataset.view === state.view;
+    let scrollTop = 0;
+    let learnScrollTop = 0;
+    const cd = document.querySelector('.layout-content');
+    const learnContainerPrev = document.getElementById('learn-list-container');
+    if (sameView) {
+        if (cd) scrollTop = cd.scrollTop;
+        if (learnContainerPrev) learnScrollTop = learnContainerPrev.scrollTop;
+    }
     app.dataset.view=state.view;
 
     let bodyHTML='', footerHTML='';
@@ -766,9 +888,10 @@ function render() {
         updateSearchUI(); 
         const container = document.getElementById('learn-list-container');
         if (state.hideAnswersInLearn && container) container.classList.add('hide-answers');
+        if (sameView && learnScrollTop > 0 && container) container.scrollTop = learnScrollTop;
     }
     
-    if(cd && scrollTop>0 && !state.searchQuery) {
+    if (sameView && scrollTop > 0) {
         const newCd = document.querySelector('.layout-content');
         if (newCd) newCd.scrollTop = scrollTop;
     }
@@ -781,20 +904,21 @@ function renderHeader() {
         <div class="flex items-center gap-3">
             ${!isHome?`<button onclick="goHome()" class="p-1 -ml-1 rounded-full hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-800 dark:text-white btn-click"><i data-lucide="chevron-left" class="w-6 h-6"></i></button>`:''}
             <div onclick="goHome()" class="flex items-center gap-2 cursor-pointer group btn-click">
-                <div class="transition-transform group-hover:scale-105"><img src="${state.isDark?"https://i.ibb.co/tw2sGMTs/image.png":"https://i.ibb.co/zWn4xWnk/image.png"}" class="w-8 h-8 object-contain rounded-lg shadow-sm"></div>
+                <div class="transition-transform group-hover:scale-105"><img id="app-logo" src="${state.isDark?"https://i.ibb.co/tw2sGMTs/image.png":"https://i.ibb.co/zWn4xWnk/image.png"}" onerror="this.style.display='none'" class="w-8 h-8 object-contain rounded-lg shadow-sm"></div>
                 <span class="font-bold text-lg text-black dark:text-white flex items-baseline"><span class="font-serif mr-[1px]">I</span>med</span>
             </div>
         </div>
         <div class="flex items-center gap-2">
-            <button onclick="toggleTheme()" class="p-2 text-slate-500 hover:text-black dark:text-slate-400 dark:hover:text-white btn-click"><i data-lucide="${state.isDark?'sun':'moon'}" class="w-6 h-6"></i></button>
+            <button id="theme-toggle-btn" onclick="toggleTheme()" class="p-2 text-slate-500 hover:text-black dark:text-slate-400 dark:hover:text-white btn-click"><i data-lucide="sun" class="w-6 h-6 hidden dark:block"></i><i data-lucide="moon" class="w-6 h-6 block dark:hidden"></i></button>
             <a href="https://t.me/stewonly" target="_blank" class="p-2 text-slate-500 hover:text-[#2AABEE] dark:text-slate-400 dark:hover:text-[#2AABEE] btn-click"><i data-lucide="send" class="w-5 h-5"></i></a>
         </div>
     </div>`;
 }
 
 function renderMenuContent() {
-    const learned=Object.values(state.userProgress||{}).filter(p=>p.status==='correct').length;
-    const errors=Object.values(state.userProgress||{}).filter(p=>p.status==='wrong').length;
+    const validIds = new Set(QUESTIONS_DATA.map(q => String(q.id)));
+    const learned = Object.entries(state.userProgress || {}).filter(([id, p]) => validIds.has(String(id)) && p.status === 'correct').length;
+    const errors = Object.entries(state.userProgress || {}).filter(([id, p]) => validIds.has(String(id)) && p.status === 'wrong').length;
     
     if(state.resumeState && state.resumeState.mode === 'mistakes' && errors === 0) {
         state.resumeState = null;
@@ -987,29 +1111,51 @@ function initFilterSwipeEvents() {
     const topicsList = document.getElementById('topics-list');
     if(!modalContent || !topicsList) return;
 
-    let startY = 0; let currentY = 0; let isDragging = false; let isScrollAtTop = true;
+    const DEAD_ZONE = 14;
+    let startY = 0;
+    let currentY = 0;
+    let canSwipe = false;
+    let swipeActivated = false;
 
     modalContent.addEventListener('touchstart', (e) => {
-        if(topicsList.scrollTop > 0) { isScrollAtTop = false; return; }
-        isScrollAtTop = true; startY = e.touches[0].clientY; isDragging = true; modalContent.style.transition = 'none';
+        const startedOnHeader = !!e.target.closest('.modal-drag-header');
+        canSwipe = startedOnHeader || topicsList.scrollTop <= 0;
+        startY = e.touches[0].clientY;
+        currentY = startY;
+        swipeActivated = false;
     }, {passive: true});
 
     modalContent.addEventListener('touchmove', (e) => {
-        if(!isDragging) return;
+        if (!canSwipe) return;
         currentY = e.touches[0].clientY;
         const diff = currentY - startY;
-        if(diff > 0 && isScrollAtTop) {
-            if(e.cancelable) e.preventDefault();
-            modalContent.style.transform = `translateY(${diff}px)`;
+
+        if (!swipeActivated) {
+            if (diff <= DEAD_ZONE) return;
+            if (!e.target.closest('.modal-drag-header') && topicsList.scrollTop > 0) {
+                canSwipe = false;
+                return;
+            }
+            swipeActivated = true;
+            modalContent.style.transition = 'none';
+        }
+
+        if (diff > DEAD_ZONE) {
+            if (e.cancelable) e.preventDefault();
+            modalContent.style.transform = `translateY(${diff - DEAD_ZONE}px)`;
         }
     }, {passive: false});
 
     modalContent.addEventListener('touchend', () => {
-        if(!isDragging) return;
-        isDragging = false;
+        if (!swipeActivated) {
+            canSwipe = false;
+            return;
+        }
         const diff = currentY - startY;
+        swipeActivated = false;
+        canSwipe = false;
         modalContent.style.transition = 'transform 0.3s ease-out';
-        if(diff > 120 && isScrollAtTop) {
+        if (diff > 120) {
             modalContent.style.transform = `translateY(100%)`;
             setTimeout(() => toggleFilterModal(false), 200);
         } else {
@@ -1039,7 +1185,7 @@ function renderFilterModal() {
 
     return `<div class="absolute inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onclick="if(event.target===this) toggleFilterModal(false)">
         <div id="filter-modal-content" class="bg-white dark:bg-slate-900 w-full sm:w-[400px] sm:rounded-3xl rounded-t-3xl p-6 shadow-2xl flex flex-col h-[85vh] mb-0 sm:mb-4 animate-slide-up">
-            <div class="flex justify-between items-center mb-2 shrink-0"><h3 class="text-xl font-bold text-slate-900 dark:text-white">Фильтр тем</h3><button onclick="toggleFilterModal(false)" class="p-2 bg-slate-100 dark:bg-slate-800 rounded-full text-slate-500 btn-click"><i data-lucide="x" class="w-5 h-5"></i></button></div>
+            <div class="modal-drag-header flex justify-between items-center mb-2 shrink-0"><h3 class="text-xl font-bold text-slate-900 dark:text-white">Фильтр тем</h3><button onclick="toggleFilterModal(false)" class="p-2 bg-slate-100 dark:bg-slate-800 rounded-full text-slate-500 btn-click"><i data-lucide="x" class="w-5 h-5"></i></button></div>
             
             <div class="flex gap-2 mb-2 shrink-0">
                 <div onclick="toggleShuffle()" class="${shuffleBtnClass}">
@@ -1050,25 +1196,24 @@ function renderFilterModal() {
                     <div id="shuffle-toggle-bg" class="w-12 h-6 rounded-full relative transition-colors ${shuffleBg} scale-75 origin-right"><div id="shuffle-toggle-knob" class="w-4 h-4 bg-white rounded-full absolute top-1 transition-all ${shuffleKnob}"></div></div>
                 </div>
 
-                <button id="select-all-btn" onclick="toggleSelectAllTopics()" class="flex-1 flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors btn-click"><span>${allSel?'Снять все':'Выбрать все'}</span><i data-lucide="${allSel?'trash-2':'layers'}" class="w-4 h-4"></i></button>
+                <button id="select-all-btn" onclick="toggleSelectAllTopics()" class="flex-1 flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors btn-click"><span class="select-all-label">${allSel?'Снять все':'Выбрать все'}</span><i data-lucide="trash-2" class="icon-clear-all w-4 h-4 ${allSel?'':'hidden'}"></i><i data-lucide="layers" class="icon-select-all w-4 h-4 ${allSel?'hidden':''}"></i></button>
             </div>
 
             <div id="topics-list" class="flex-1 overflow-y-auto space-y-2 mb-4 pr-1">
-                ${availableTopics.map(t=>{
+                ${availableTopics.map((t, idx)=>{
                     const sel = state.selectedTopics.includes(t);
                     const { total, correct } = stats[t] || { total: 0, correct: 0 };
                     const progress = total > 0 ? Math.round((correct / total) * 100) : 0;
-                    let barBg = sel ? 'bg-white/20 dark:bg-black/20' : 'bg-slate-200 dark:bg-slate-700';
-                    let fillBg = sel ? 'bg-emerald-400 dark:bg-emerald-600' : 'bg-emerald-500';
-                    let txtColor = sel ? 'text-white/60 dark:text-black/60' : 'text-slate-400';
-                    let progressHtml = `<div class="w-full h-1.5 ${barBg} rounded-full mt-2 overflow-hidden"><div class="h-full ${fillBg} rounded-full" style="width: ${progress}%"></div></div><div class="text-[10px] ${txtColor} mt-1 flex justify-between"><span>Прогресс (${correct}/${total})</span><span>${progress}%</span></div>`;
+                    const barBg = sel ? 'bg-white/20 dark:bg-black/20' : 'bg-slate-200 dark:bg-slate-700';
+                    const fillBg = sel ? 'bg-emerald-400 dark:bg-emerald-600' : 'bg-emerald-500';
+                    const txtColor = sel ? 'text-white/60 dark:text-black/60' : 'text-slate-400';
+                    const progressHtml = `<div class="topic-bar-bg w-full h-1.5 ${barBg} rounded-full mt-2 overflow-hidden"><div class="topic-fill-bg h-full ${fillBg} rounded-full" style="width: ${progress}%"></div></div><div class="topic-progress-txt text-[10px] ${txtColor} mt-1 flex justify-between"><span>Прогресс (${correct}/${total})</span><span>${progress}%</span></div>`;
 
-                    let btnClass = "w-full text-left px-4 py-3 rounded-xl font-bold text-sm flex flex-col gap-1 group btn-click relative";
-                    let iconHtml = '';
-                    if(sel) { btnClass += " bg-black text-white dark:bg-white dark:text-black border border-transparent"; iconHtml='<i data-lucide="check-circle" class="w-4 h-4 absolute top-3 right-3 text-emerald-400 dark:text-emerald-600"></i>'; } 
-                    else { btnClass += " bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 relative"; }
+                    let btnClass = "topic-btn w-full text-left px-4 py-3 rounded-xl font-bold text-sm flex flex-col gap-1 group relative border";
+                    if(sel) btnClass += " bg-black text-white dark:bg-white dark:text-black border-transparent";
+                    else btnClass += " bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300";
                     
-                    return `<button data-topic="${t}" onclick="toggleTopic('${t}')" class="${btnClass}"><div class="topic-content w-full"><span class="block text-wrap leading-tight pr-6 mb-1">${t}</span> ${progressHtml}</div><div class="icon-area">${iconHtml}</div></button>`
+                    return `<button data-i="${idx}" onclick="toggleTopicByIndex(${idx})" class="${btnClass}"><div class="topic-content w-full"><span class="block text-wrap leading-tight pr-6 mb-1">${escapeHtml(t)}</span> ${progressHtml}</div><div class="icon-area"><i data-lucide="check-circle" class="topic-check-icon w-4 h-4 absolute top-3 right-3 text-emerald-400 dark:text-emerald-600 ${sel ? '' : 'hidden'}"></i></div></button>`
                 }).join('')}
             </div>
             <button id="apply-btn" onclick="toggleFilterModal(false)" class="w-full py-4 bg-black dark:bg-white text-white dark:text-black rounded-2xl font-bold text-lg shrink-0 btn-click">Применить (${state.selectedTopics.length})</button>
@@ -1083,8 +1228,14 @@ function renderResetModal() {
         <div class="bg-white dark:bg-slate-900 w-full sm:w-[400px] sm:rounded-3xl rounded-t-3xl p-6 shadow-2xl flex flex-col h-[85vh] mb-0 sm:mb-4 animate-slide-up">
             <div class="flex justify-between items-center mb-4 shrink-0"><h3 class="text-xl font-bold text-slate-900 dark:text-white">Сброс прогресса</h3><button onclick="toggleResetModal(false)" class="p-2 bg-slate-100 dark:bg-slate-800 rounded-full text-slate-500 btn-click"><i data-lucide="x" class="w-5 h-5"></i></button></div>
             <div id="reset-topics-list" class="flex-1 overflow-y-auto space-y-2 mb-4 pr-1">
-                <button id="reset-select-all-btn" onclick="toggleSelectAllReset()" class="w-full text-left px-4 py-3 rounded-xl font-bold text-sm bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors flex justify-between items-center btn-click"><span>${allSel?'Снять все':'Выбрать все'}</span><i data-lucide="${allSel?'trash-2':'layers'}" class="w-4 h-4"></i></button>
-                ${availableTopics.map(t=>{return`<button data-topic="${t}" onclick="toggleResetTopic('${t}')" class="w-full text-left px-4 py-3 rounded-xl font-bold text-sm flex flex-col gap-1 group btn-click bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 relative"><div class="topic-content w-full"><span class="block text-wrap leading-tight pr-6 mb-1">${t}</span></div><div class="icon-area"></div></button>`}).join('')}
+                <button id="reset-select-all-btn" onclick="toggleSelectAllReset()" class="w-full text-left px-4 py-3 rounded-xl font-bold text-sm bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors flex justify-between items-center btn-click"><span class="select-all-label">${allSel?'Снять все':'Выбрать все'}</span><i data-lucide="trash-2" class="icon-clear-all w-4 h-4 ${allSel?'':'hidden'}"></i><i data-lucide="layers" class="icon-select-all w-4 h-4 ${allSel?'hidden':''}"></i></button>
+                ${availableTopics.map((t, idx)=>{
+                    const sel = state.resetSelectedTopics.includes(t);
+                    let btnClass = "topic-btn w-full text-left px-4 py-3 rounded-xl font-bold text-sm flex flex-col gap-1 group relative border";
+                    if(sel) btnClass += " bg-black text-white dark:bg-white dark:text-black border-transparent";
+                    else btnClass += " bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300";
+                    return `<button data-i="${idx}" onclick="toggleResetTopicByIndex(${idx})" class="${btnClass}"><div class="topic-content w-full"><span class="block text-wrap leading-tight pr-6 mb-1">${escapeHtml(t)}</span></div><div class="icon-area"><i data-lucide="check-circle" class="topic-check-icon w-4 h-4 absolute top-3 right-3 text-emerald-400 dark:text-emerald-600 ${sel ? '' : 'hidden'}"></i></div></button>`
+                }).join('')}
             </div>
             <button id="confirm-reset-btn" onclick="confirmReset()" class="w-full py-4 bg-rose-500 text-white rounded-2xl font-bold text-lg shrink-0 btn-click shadow-lg shadow-rose-500/30">Сбросить</button>
         </div>
@@ -1112,7 +1263,10 @@ function renderConfirmResetDialog() {
 function initCardEvents() {
     const card = document.getElementById('flashcard'); if (!card) return;
     let startX = 0; let startY = 0; let isSwiping = false; let isScrolling = false;
-    card.style.transform = 'translateX(0px) rotate(0deg)'; card.style.transition = 'transform 0.3s ease-out';
+    if (state.animState !== 'animating') {
+        card.style.transform = 'translateX(0px) rotate(0deg)';
+        card.style.transition = 'transform 0.3s ease-out';
+    }
     card.ontouchstart = (e) => { if (state.animState !== 'idle') return; startX = e.touches[0].clientX; startY = e.touches[0].clientY; isSwiping = false; isScrolling = false; card.style.transition = 'none'; };
     card.ontouchmove = (e) => {
         if (state.animState !== 'idle') return; if (isScrolling) return;
@@ -1129,16 +1283,42 @@ function initCardEvents() {
 function handleCardClick() { if (state.animState === 'idle') toggleFlip(); }
 
 function animateCard(dir) {
+    if (state.animState !== 'idle') return;
     const card = document.getElementById('flashcard');
-    if ((dir === 'next' && state.currentQuestionIndex >= state.playableQuestions.length - 1) || (dir === 'prev' && state.currentQuestionIndex <= 0)) { card.style.transition = 'transform 0.3s ease-out'; card.style.transform = 'translateX(0) rotate(0deg)'; return; }
-    state.animState = 'animating'; card.style.transition = 'transform 0.2s ease-in, opacity 0.2s ease-in';
-    card.style.transform = dir === 'next' ? 'translateX(-120vw) rotate(-20deg)' : 'translateX(120vw) rotate(20deg)'; card.style.opacity = '0';
+    if (!card) return;
+    if ((dir === 'next' && state.currentQuestionIndex >= state.playableQuestions.length - 1) || (dir === 'prev' && state.currentQuestionIndex <= 0)) {
+        card.style.transition = 'transform 0.3s ease-out';
+        card.style.transform = 'translateX(0) rotate(0deg)';
+        return;
+    }
+    state.animState = 'animating';
+    card.style.transition = 'transform 0.2s ease-in, opacity 0.2s ease-in';
+    card.style.transform = dir === 'next' ? 'translateX(-120vw) rotate(-20deg)' : 'translateX(120vw) rotate(20deg)';
+    card.style.opacity = '0';
     setTimeout(() => {
-        if (dir === 'next') state.currentQuestionIndex++; else state.currentQuestionIndex--;
-        state.isFlipped = false; state.swipeX = 0; render(); 
-        const newCard = document.getElementById('flashcard'); newCard.style.transition = 'none';
-        newCard.style.transform = dir === 'next' ? 'translateX(120vw) rotate(20deg)' : 'translateX(-120vw) rotate(-20deg)'; newCard.style.opacity = '0';
-        requestAnimationFrame(() => { newCard.style.transition = 'transform 0.3s ease-out, opacity 0.3s ease-out'; newCard.style.transform = 'translateX(0) rotate(0deg)'; newCard.style.opacity = '1'; setTimeout(() => { state.animState = 'idle'; }, 300); });
+        const nextIdx = state.currentQuestionIndex + (dir === 'next' ? 1 : -1);
+        if (nextIdx < 0 || nextIdx >= state.playableQuestions.length) {
+            state.animState = 'idle';
+            render();
+            return;
+        }
+        state.currentQuestionIndex = nextIdx;
+        state.isFlipped = false;
+        state.swipeX = 0;
+        render(); 
+        const newCard = document.getElementById('flashcard');
+        if (!newCard) { state.animState = 'idle'; return; }
+        newCard.style.transition = 'none';
+        newCard.style.transform = dir === 'next' ? 'translateX(120vw) rotate(20deg)' : 'translateX(-120vw) rotate(-20deg)';
+        newCard.style.opacity = '0';
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                newCard.style.transition = 'transform 0.3s ease-out, opacity 0.3s ease-out';
+                newCard.style.transform = 'translateX(0) rotate(0deg)';
+                newCard.style.opacity = '1';
+                setTimeout(() => { state.animState = 'idle'; }, 300);
+            });
+        });
     }, 200);
 }
 function toggleFlip() { haptic('light'); state.isFlipped = !state.isFlipped; const inner = document.getElementById('card-inner'); if (inner) { if (state.isFlipped) inner.classList.add('rotate-y-180'); else inner.classList.remove('rotate-y-180'); } }
