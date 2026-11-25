@@ -1,6 +1,5 @@
-const USE_AUTH = true;
+const USE_AUTH = false; // Для теста в IMED-test = false. Перед переносом в основной IMED поменяй на true!
 const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzn9ttSMjIDz041CJWVnbla1pdf7qCh50hb8XUoybc_Le2iND9O57OuJ4IK9Zx5Uv52/exec";
-const STORAGE_PREFIX = "imed_pathophys_col1_";
 const ACCESS_POLL_INTERVAL_MS = 15000;
 
 let QUESTIONS_DATA = [];
@@ -29,12 +28,35 @@ try {
 
 function safeIcons() { try { if (window.lucide) lucide.createIcons(); } catch(e) {} }
 
+const state = { 
+    activeColloquium: 1,
+    view: 'menu', isDark: false, showFilterModal: false, showResetModal: false, showConfirmResetDialog: false, 
+    selectedTopics: [], resetSelectedTopics: [], userProgress: {}, resumeState: null, playableQuestions: [], 
+    currentQuestionIndex: 0, quizFinished: false, sessionAnswers: {}, selectedOptions: [], isAnswerChecked: false, 
+    lastResult: false, isShuffleEnabled: false, hideAnswersInLearn: false, isFlipped: false, swipeX: 0, animState: 'idle',
+    searchQuery: '', filteredLearnQuestions: [], learnRenderLimit: 20, searchCurrentIndex: -1
+};
+
+try {
+    const savedCol = localStorage.getItem('imed_pathophys_active_col');
+    if (savedCol === '2') state.activeColloquium = 2;
+} catch(e) {}
+
+function getStoragePrefix() {
+    return state.activeColloquium === 2 ? 'imed_pathophys_col2_' : 'imed_pathophys_col1_';
+}
+
+function getEffectiveUserId() {
+    return currentUserId || (!USE_AUTH ? 'local_test' : null);
+}
+
 let localLoaded = false;
 
 function persistLocal() {
-    if (!currentUserId) return;
+    const uid = getEffectiveUserId();
+    if (!uid) return;
     try {
-        localStorage.setItem(`${STORAGE_PREFIX}progress_${currentUserId}`, JSON.stringify({
+        localStorage.setItem(`${getStoragePrefix()}progress_${uid}`, JSON.stringify({
             progress: state.userProgress,
             selectedTopics: state.selectedTopics
         }));
@@ -42,10 +64,13 @@ function persistLocal() {
 }
 
 function loadLocalFallback() {
-    if (!currentUserId) return;
+    const uid = getEffectiveUserId();
+    if (!uid) return;
+    state.userProgress = {};
+    state.selectedTopics = [];
     try {
-        localStorage.removeItem(`${STORAGE_PREFIX}access_${currentUserId}`);
-        const raw = localStorage.getItem(`${STORAGE_PREFIX}progress_${currentUserId}`);
+        localStorage.removeItem(`imed_pathophys_col1_access_${uid}`);
+        const raw = localStorage.getItem(`${getStoragePrefix()}progress_${uid}`);
         if (raw) {
             const p = JSON.parse(raw);
             if (p && typeof p === 'object') {
@@ -58,6 +83,21 @@ function loadLocalFallback() {
 
 function saveProgressToCloud() {
     persistLocal();
+}
+
+function switchColloquium(colNum) {
+    if (state.activeColloquium === colNum) return;
+    haptic('medium');
+    persistLocal();
+    state.activeColloquium = colNum;
+    try { localStorage.setItem('imed_pathophys_active_col', String(colNum)); } catch(e) {}
+    state.resumeState = null;
+    state.playableQuestions = [];
+    state.sessionAnswers = {};
+    state.searchQuery = '';
+    loadLocalFallback();
+    processQuestions();
+    render();
 }
 
 function haptic(type='light') {
@@ -74,15 +114,26 @@ document.addEventListener('touchend', (e)=>{if(!window.sw)return;const ex=e.chan
 
 function escapeHtml(t) { if(!t)return""; return t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
 
+function getActiveRawData() {
+    if (state.activeColloquium === 2 && typeof RAW_PATHOPHYS_COL2_QUESTIONS !== 'undefined' && typeof TOPIC_RANGES_COL2 !== 'undefined') {
+        return { questions: RAW_PATHOPHYS_COL2_QUESTIONS, ranges: TOPIC_RANGES_COL2 };
+    }
+    return {
+        questions: typeof RAW_PATHOPHYS_QUESTIONS !== 'undefined' ? RAW_PATHOPHYS_QUESTIONS : [],
+        ranges: typeof TOPIC_RANGES !== 'undefined' ? TOPIC_RANGES : []
+    };
+}
+
 function processQuestions() {
-    if (!accessData || !accessData.allowed) {
+    if (USE_AUTH && (!accessData || !accessData.allowed)) {
         QUESTIONS_DATA = [];
         availableTopics = [];
         state.playableQuestions = [];
         return;
     }
-    QUESTIONS_DATA = RAW_PATHOPHYS_QUESTIONS.map((q) => {
-        const t = TOPIC_RANGES.find(r => q.id >= r.start && q.id <= r.end) || TOPIC_RANGES[0];
+    const { questions, ranges } = getActiveRawData();
+    QUESTIONS_DATA = questions.map((q) => {
+        const t = ranges.find(r => q.id >= r.start && q.id <= r.end) || ranges[0];
         const qText = escapeHtml(q.q);
         const oText = (q.o || []).map(o => escapeHtml(o));
         const cleanTopic = t ? t.title.replace(/^\s*\d+\s*[\.\)\-:]\s*/, '') : "";
@@ -102,10 +153,12 @@ function processQuestions() {
         state.selectedTopics = [...availableTopics];
     } else {
         state.selectedTopics = state.selectedTopics.filter(t => availableTopics.includes(t));
-        const oldTopics = availableTopics.slice(0, 7);
-        const hadAllOldSelected = oldTopics.every(t => state.selectedTopics.includes(t));
-        if (hadAllOldSelected && state.selectedTopics.length === 7) {
-            state.selectedTopics = [...availableTopics];
+        if (state.activeColloquium === 1) {
+            const oldTopics = availableTopics.slice(0, 7);
+            const hadAllOldSelected = oldTopics.every(t => state.selectedTopics.includes(t));
+            if (hadAllOldSelected && state.selectedTopics.length === 7) {
+                state.selectedTopics = [...availableTopics];
+            }
         }
         if (state.selectedTopics.length === 0) {
             state.selectedTopics = [...availableTopics];
@@ -120,14 +173,6 @@ function clearProtectedContent() {
     state.filteredLearnQuestions = [];
     state.resumeState = null;
 }
-
-const state = { 
-    view: 'menu', isDark: false, showFilterModal: false, showResetModal: false, showConfirmResetDialog: false, 
-    selectedTopics: [], resetSelectedTopics: [], userProgress: {}, resumeState: null, playableQuestions: [], 
-    currentQuestionIndex: 0, quizFinished: false, sessionAnswers: {}, selectedOptions: [], isAnswerChecked: false, 
-    lastResult: false, isShuffleEnabled: false, hideAnswersInLearn: false, isFlipped: false, swipeX: 0, animState: 'idle',
-    searchQuery: '', filteredLearnQuestions: [], learnRenderLimit: 20, searchCurrentIndex: -1
-};
 
 function getTelegramUserId() {
     try {
@@ -189,7 +234,7 @@ async function performAccessCheck() {
         return;
     }
 
-    try { localStorage.removeItem(`${STORAGE_PREFIX}access_${currentUserId}`); } catch(e) {}
+    try { localStorage.removeItem(`imed_pathophys_col1_access_${currentUserId}`); } catch(e) {}
 
     isCheckingAccess = true;
     const tgUser = (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initDataUnsafe && window.Telegram.WebApp.initDataUnsafe.user) || {};
@@ -515,13 +560,27 @@ function checkAnswer() {
 }
 function nextQuestion() {
     haptic('light'); saveCurrentState();
-    if(state.currentQuestionIndex<state.playableQuestions.length-1) { state.currentQuestionIndex++; loadStateForIndex(state.currentQuestionIndex); document.querySelector('.layout-content').scrollTop=0; }
+    if(state.currentQuestionIndex<state.playableQuestions.length-1) {
+        state.currentQuestionIndex++;
+        loadStateForIndex(state.currentQuestionIndex);
+        render();
+        const cd = document.querySelector('.layout-content');
+        if (cd) cd.scrollTop = 0;
+        return;
+    }
     else state.quizFinished=true;
     render();
 }
 function prevQuestion() {
     haptic('light'); saveCurrentState();
-    if(state.currentQuestionIndex>0) { state.currentQuestionIndex--; loadStateForIndex(state.currentQuestionIndex); }
+    if(state.currentQuestionIndex>0) {
+        state.currentQuestionIndex--;
+        loadStateForIndex(state.currentQuestionIndex);
+        render();
+        const cd = document.querySelector('.layout-content');
+        if (cd) cd.scrollTop = 0;
+        return;
+    }
     render();
 }
 function goHome() {
@@ -664,7 +723,7 @@ function renderLearnList() {
         </div>`;
     }).join('');
 
-    container.innerHTML = html + '<div id="learn-sentinel" class="h-10 w-full"></div>';
+    container.innerHTML = html + '<div id="learn-sentinel" class="h-12 w-full"></div>';
     
     if (learnObserver) learnObserver.disconnect();
     const sentinel = document.getElementById('learn-sentinel');
@@ -709,7 +768,10 @@ function render() {
         if (state.hideAnswersInLearn && container) container.classList.add('hide-answers');
     }
     
-    if(cd && scrollTop>0 && !state.searchQuery) document.querySelector('.layout-content').scrollTop=scrollTop;
+    if(cd && scrollTop>0 && !state.searchQuery) {
+        const newCd = document.querySelector('.layout-content');
+        if (newCd) newCd.scrollTop = scrollTop;
+    }
     safeIcons();
 }
 
@@ -740,12 +802,22 @@ function renderMenuContent() {
     
     const allSel=state.selectedTopics.length===availableTopics.length;
     const selectedQuestionsCount = QUESTIONS_DATA.filter(q => state.selectedTopics.includes(q.topic)).length;
+    const isCol1 = state.activeColloquium === 1;
+    const isCol2 = state.activeColloquium === 2;
 
-    return `<div class="p-4 space-y-4 animate-fade-in pb-10">
+    return `<div class="p-4 space-y-4 animate-fade-in pb-8">
+        <div class="bg-slate-200/80 dark:bg-slate-900 p-1 rounded-2xl flex gap-1 border border-slate-200 dark:border-slate-800">
+            <button onclick="switchColloquium(1)" class="flex-1 py-2.5 px-3 rounded-xl text-xs font-extrabold transition-all btn-click ${isCol1 ? 'bg-black text-white dark:bg-white dark:text-black shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'}">1 Коллоквиум</button>
+            <button onclick="switchColloquium(2)" class="flex-1 py-2.5 px-3 rounded-xl text-xs font-extrabold transition-all btn-click flex items-center justify-center gap-1.5 ${isCol2 ? 'bg-black text-white dark:bg-white dark:text-black shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'}">
+                <span>2 Коллоквиум</span>
+                <span class="text-[9px] px-1.5 py-0.5 rounded-md font-black ${isCol2 ? 'bg-[#FFD700] text-black' : 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300'}">NEW</span>
+            </button>
+        </div>
+
         <div class="bg-black dark:bg-slate-900 rounded-[2rem] p-6 text-white shadow-soft dark:shadow-none relative overflow-hidden">
             <div class="relative z-10">
                 <h1 class="text-2xl font-black mb-1 tracking-tight">Патофизиология</h1>
-                <p class="text-slate-400 font-medium text-xs mb-4">Коллоквиум №1 • ${QUESTIONS_DATA.length} вопросов</p>
+                <p class="text-slate-400 font-medium text-xs mb-4">Коллоквиум №${state.activeColloquium} • ${QUESTIONS_DATA.length} вопросов</p>
                 <button onclick="toggleFilterModal(true)" class="flex items-center gap-2 text-[10px] font-bold bg-white/10 hover:bg-white/20 active:scale-95 w-fit px-4 py-2 rounded-xl border border-white/10 btn-click"><i data-lucide="filter" class="w-3 h-3 text-white"></i><span>${allSel?'Все темы':`${state.selectedTopics.length} тем выбрано`}</span></button>
             </div>
             <div class="absolute -right-6 -bottom-6 w-32 h-32 bg-white/10 rounded-full blur-2xl pointer-events-none"></div>
@@ -770,7 +842,7 @@ function renderMenuContent() {
 function renderLearnContent() {
     const isSearchVisible = state.searchQuery && state.searchQuery.trim().length > 0;
     
-    return `<div class="px-4 pt-2 h-full flex flex-col animate-fade-in gap-2">
+    return `<div class="px-4 pt-2 flex-1 min-h-0 flex flex-col animate-fade-in gap-2">
         <div class="flex gap-2 items-center shrink-0 z-20 bg-slate-50 dark:bg-black pb-1">
         <div class="relative flex-1">
                 <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><i data-lucide="search" class="w-4 h-4 text-slate-400"></i></div>
@@ -796,7 +868,7 @@ function renderLearnContent() {
         <div id="learn-list-container" 
              onscroll="document.activeElement?.blur()"
              ontouchstart="if(document.activeElement.tagName==='INPUT') document.activeElement.blur()"
-             class="learn-container transition-opacity duration-200 flex-1 overflow-y-auto -mx-4 px-4 pb-0">
+             class="learn-container transition-opacity duration-200 flex-1 min-h-0 overflow-y-auto -mx-4 px-4 pb-6">
         </div>
     </div>`;
 }
@@ -807,9 +879,9 @@ function renderQuizContent() {
     const pct=((state.currentQuestionIndex+1)/state.playableQuestions.length)*100;
     const isMulti = q.correctIndices.length > 1;
 
-    return `<div class="flex flex-col h-full animate-fade-in relative">
-        <div class="h-1 w-full bg-slate-200 dark:bg-slate-800 shrink-0"><div class="h-full bg-black dark:bg-white transition-all duration-300" style="width:${pct}%"></div></div>
-        <div class="p-4 w-full max-w-xl mx-auto pb-10">
+    return `<div class="flex flex-col animate-fade-in relative w-full">
+        <div class="h-1 w-full bg-slate-200 dark:bg-slate-800 shrink-0 sticky top-0 z-10"><div class="h-full bg-black dark:bg-white transition-all duration-300" style="width:${pct}%"></div></div>
+        <div class="p-4 w-full max-w-xl mx-auto pb-8">
             <div class="flex justify-between items-start mb-3 gap-4">
                 <span class="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest bg-white dark:bg-slate-900 px-3 py-1.5 rounded-xl border border-slate-100 dark:border-slate-800 leading-tight">${q.topic}</span>
                 <span class="text-xs font-black text-slate-300 dark:text-slate-600 whitespace-nowrap mt-1">#${q.id} • ${state.currentQuestionIndex+1}/${state.playableQuestions.length}</span>
@@ -857,7 +929,7 @@ function renderQuizFooter() {
 
 function renderQuizFinished() {
     const isMistakes = state.view === 'mistakes';
-    return `<div class="flex flex-col items-center justify-center h-full p-6 text-center animate-fade-in">
+    return `<div class="flex flex-col items-center justify-center min-h-full p-6 text-center animate-fade-in">
         ${state.playableQuestions.length===0 ? `<div class="bg-slate-100 dark:bg-slate-800 p-6 rounded-full mb-6"><i data-lucide="${isMistakes?'check-circle':'filter'}" class="w-12 h-12 ${isMistakes?'text-emerald-500':'text-slate-400 dark:text-slate-600'}"></i></div><h2 class="text-2xl font-black text-slate-900 dark:text-white mb-2">${isMistakes?'Чисто!':'Пусто'}</h2><p class="text-slate-500 dark:text-slate-400 mb-8 max-w-xs font-medium">${isMistakes?'Ошибок нет. Ты машина!':'Нет вопросов в выбранных темах.'}</p>` : `<i data-lucide="award" class="w-24 h-24 text-yellow-400 mb-6 drop-shadow-xl"></i><h2 class="text-3xl font-black text-slate-900 dark:text-white mb-2">Финиш!</h2><p class="text-slate-500 dark:text-slate-400 mb-10 font-medium">Все вопросы пройдены.</p><div class="flex flex-col gap-3 w-full max-w-xs"><button onclick="startMode('${state.view}')" class="w-full bg-black dark:bg-white text-white dark:text-black py-4 rounded-2xl font-bold shadow-lg btn-click">Пройти еще раз</button></div>`}
         <button onclick="goHome()" class="mt-4 bg-transparent border-2 border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white px-10 py-4 rounded-2xl font-bold btn-click">В меню</button>
     </div>`;
@@ -868,9 +940,9 @@ function renderCardsContent() {
     const q=state.playableQuestions[state.currentQuestionIndex];
     const correctText=q.correctIndices.map(i=>`<span class="opacity-70">${i+1})</span> ${q.options[i]}`).join('<br><br>');
     
-    return `<div class="flex flex-col h-full p-4 overflow-hidden select-none animate-fade-in relative">
+    return `<div class="flex flex-col flex-1 min-h-0 p-4 overflow-hidden select-none animate-fade-in relative">
         <div class="flex justify-center mb-2 text-xs font-black text-slate-300 dark:text-slate-700 flex-shrink-0">#${q.id} • ${state.currentQuestionIndex+1} / ${state.playableQuestions.length}</div>
-        <div class="flex-1 relative perspective-1000 max-w-sm mx-auto w-full mb-4">
+        <div class="flex-1 min-h-0 relative perspective-1000 max-w-sm mx-auto w-full mb-2">
             <div id="flashcard" class="w-full h-full relative" onclick="handleCardClick()">
                 <div id="card-inner" class="w-full h-full relative preserve-3d cursor-pointer transition-transform duration-500 ${state.isFlipped?'rotate-y-180':''}">
                     <div class="absolute inset-0 backface-hidden flex flex-col p-4 rounded-[2rem] bg-white dark:bg-slate-900 shadow-2xl shadow-slate-200 dark:shadow-none border border-slate-200 dark:border-slate-800 items-start overflow-hidden">
@@ -882,7 +954,7 @@ function renderCardsContent() {
                                     if(!opt||!opt.trim())return'';
                                     return `<div class="w-full p-3 rounded-lg border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-black/20 text-xs font-medium text-slate-600 dark:text-slate-300 text-left leading-tight">${idx+1}) ${opt}</div>`
                                 }).join('')}
-                                <div class="h-8 w-full shrink-0"></div>
+                                <div class="h-4 w-full shrink-0"></div>
                              </div>
                          </div>
                          <div class="mt-auto w-full text-center pt-2 border-t border-slate-100 dark:border-slate-800 shrink-0"><span class="text-slate-400 text-[10px] font-bold flex items-center justify-center gap-1 opacity-50"><i data-lucide="rotate-ccw" class="w-3 h-3"></i> Нажми для ответа</span></div>
@@ -891,7 +963,7 @@ function renderCardsContent() {
                         <h3 class="text-[10px] font-bold opacity-50 uppercase tracking-widest mb-4 text-white dark:text-white shrink-0">Правильный ответ</h3>
                         <div class="flex-1 flex flex-col items-center justify-center w-full card-scroll min-h-0">
                             <div class="text-base sm:text-lg font-bold mb-6 text-[#FFD700] dark:text-[#FFD700] select-none leading-snug">${correctText}</div>
-                            <div class="h-8 w-full shrink-0"></div>
+                            <div class="h-4 w-full shrink-0"></div>
                         </div>
                     </div>
                 </div>
