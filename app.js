@@ -287,6 +287,10 @@ async function performAccessCheck() {
             accessError = null;
             accessData = { allowed: true }; 
             processQuestions();
+        } else if (data && data.reason === 'invalid_signature') {
+            accessData = null;
+            clearProtectedContent();
+            accessError = { type: 'invalid_signature', msg: 'Не удалось подтвердить Telegram-сессию. Перезапустите приложение.' };
         } else if (data && (data.error || data.reason === 'expired')) {
             const err = new Error(data.reason || data.error);
             err.code = data.reason || 'server_error';
@@ -335,6 +339,7 @@ function checkStateTransition() {
             block.classList.remove('hidden-force');
             let icon = 'lock', title = 'Доступ закрыт';
             if (accessError.type === 'expired') { icon = 'clock'; title = 'Сессия устарела'; }
+            else if (accessError.type === 'invalid_signature') { icon = 'shield-alert'; title = 'Ошибка сессии'; }
             else if (accessError.type === 'network') { icon = 'wifi-off'; title = 'Нет связи'; }
             block.innerHTML = `
             <div class="flex flex-col items-center justify-center h-full animate-fade-in px-4">
@@ -346,7 +351,7 @@ function checkStateTransition() {
                 ${accessError.type === 'denied'
                     ? `<button onclick="try{window.Telegram.WebApp.close()}catch(e){}" class="w-full max-w-xs bg-black dark:bg-white text-white dark:text-black py-4 rounded-2xl font-bold shadow-lg btn-click mb-3">🧾 Отправить чек в бота</button>
                        <button onclick="retryAccessCheck()" class="w-full max-w-xs bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 py-3.5 rounded-2xl font-bold text-sm btn-click mb-3">🔄 Проверить доступ снова</button>`
-                    : accessError.type === 'expired'
+                    : (accessError.type === 'expired' || accessError.type === 'invalid_signature')
                         ? `<button onclick="try{window.Telegram.WebApp.close()}catch(e){location.reload()}" class="w-full max-w-xs bg-black dark:bg-white text-white dark:text-black py-4 rounded-2xl font-bold shadow-lg btn-click mb-3">Перезапустить</button>`
                         : `<button onclick="retryAccessCheck()" class="w-full max-w-xs bg-black dark:bg-white text-white dark:text-black py-4 rounded-2xl font-bold shadow-lg btn-click mb-3">Повторить</button>`}
                 <a href="https://t.me/stewonly" class="w-full max-w-xs bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 py-3.5 rounded-2xl font-bold text-sm text-center btn-click">Написать @stewonly</a>
