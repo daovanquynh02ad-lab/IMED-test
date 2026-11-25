@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Imed — Патофизиология (1 Коллоквиум)</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=Noto+Serif:wght@700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <script>
+        tailwind.config = { darkMode: 'class', theme: { extend: { colors: { gold: '#FFD700' } } } }
+    </script>
+</head>
+<body class="bg-slate-50 text-slate-900 transition-colors duration-300 selection:bg-[#FFD700] selection:text-black">
+
+<div id="mobile-wrapper" class="bg-slate-50 dark:bg-black">
+    <div id="intro-layer" class="hidden-force">
+        <video id="intro-video" playsinline preload="auto" muted autoplay><source src="intro.mp4" type="video/mp4"></video>
+    </div>
+    
+    <div id="auth-screen" class="hidden-force bg-slate-50 dark:bg-black">
+        <div class="animate-spin text-indigo-600 mb-4"><i data-lucide="loader-2" class="w-10 h-10"></i></div>
+        <p class="text-slate-500 font-medium">Проверка доступа...</p>
+    </div>
+
+    <div id="block-screen" class="hidden-force bg-slate-50 dark:bg-black p-6 text-center"></div>
+
+    <div id="app"></div>
+</div>
+
+<script src="questions.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
