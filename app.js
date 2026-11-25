@@ -1,6 +1,6 @@
 const USE_AUTH = false; // Для теста в IMED-test = false. Перед переносом в основной IMED поменяй на true!
 const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzn9ttSMjIDz041CJWVnbla1pdf7qCh50hb8XUoybc_Le2iND9O57OuJ4IK9Zx5Uv52/exec";
-const ACCESS_POLL_INTERVAL_MS = 15000;
+const ACCESS_POLL_INTERVAL_MS = 60000;
 
 let QUESTIONS_DATA = [];
 let availableTopics = [];
@@ -124,6 +124,11 @@ function flushPendingSave() {
         saveProgressToCloud();
     }
 }
+
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushPendingSave();
+});
+window.addEventListener('pagehide', flushPendingSave);
 
 function switchColloquium(colNum) {
     if (state.activeColloquium === colNum) return;
@@ -282,6 +287,10 @@ async function performAccessCheck() {
             accessError = null;
             accessData = { allowed: true }; 
             processQuestions();
+        } else if (data && (data.error || data.reason === 'expired')) {
+            const err = new Error(data.reason || data.error);
+            err.code = data.reason || 'server_error';
+            throw err;
         } else {
             accessData = null;
             clearProtectedContent();
@@ -291,7 +300,11 @@ async function performAccessCheck() {
         if (!accessData || !accessData.allowed) {
             accessData = null;
             clearProtectedContent();
-            accessError = { type: 'network', msg: 'Ошибка сети. Проверьте подключение к интернету.' };
+            if (e && e.code === 'expired') {
+                accessError = { type: 'expired', msg: 'Сессия устарела. Перезапустите приложение.' };
+            } else {
+                accessError = { type: 'network', msg: 'Ошибка сети. Проверьте подключение к интернету.' };
+            }
         }
     } finally {
         isCheckingAccess = false;
@@ -321,6 +334,8 @@ function checkStateTransition() {
         if (block) {
             block.classList.remove('hidden-force');
             let icon = 'lock', title = 'Доступ закрыт';
+            if (accessError.type === 'expired') { icon = 'clock'; title = 'Сессия устарела'; }
+            else if (accessError.type === 'network') { icon = 'wifi-off'; title = 'Нет связи'; }
             block.innerHTML = `
             <div class="flex flex-col items-center justify-center h-full animate-fade-in px-4">
                 <div class="bg-rose-100 dark:bg-rose-900/30 p-6 rounded-full mb-6">
@@ -331,7 +346,9 @@ function checkStateTransition() {
                 ${accessError.type === 'denied'
                     ? `<button onclick="try{window.Telegram.WebApp.close()}catch(e){}" class="w-full max-w-xs bg-black dark:bg-white text-white dark:text-black py-4 rounded-2xl font-bold shadow-lg btn-click mb-3">🧾 Отправить чек в бота</button>
                        <button onclick="retryAccessCheck()" class="w-full max-w-xs bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 py-3.5 rounded-2xl font-bold text-sm btn-click mb-3">🔄 Проверить доступ снова</button>`
-                    : `<button onclick="retryAccessCheck()" class="w-full max-w-xs bg-black dark:bg-white text-white dark:text-black py-4 rounded-2xl font-bold shadow-lg btn-click mb-3">Повторить</button>`}
+                    : accessError.type === 'expired'
+                        ? `<button onclick="try{window.Telegram.WebApp.close()}catch(e){location.reload()}" class="w-full max-w-xs bg-black dark:bg-white text-white dark:text-black py-4 rounded-2xl font-bold shadow-lg btn-click mb-3">Перезапустить</button>`
+                        : `<button onclick="retryAccessCheck()" class="w-full max-w-xs bg-black dark:bg-white text-white dark:text-black py-4 rounded-2xl font-bold shadow-lg btn-click mb-3">Повторить</button>`}
                 <a href="https://t.me/stewonly" class="w-full max-w-xs bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 py-3.5 rounded-2xl font-bold text-sm text-center btn-click">Написать @stewonly</a>
             </div>`;
             safeIcons();
@@ -588,6 +605,7 @@ function startMode(mode, resume=false) {
     if (USE_AUTH) performAccessCheck();
 
     haptic('medium');
+    state.animState = 'idle';
     if(resume && (!state.resumeState || !state.resumeState.questions || state.resumeState.questions.length === 0)) resume = false;
     if(resume && state.resumeState?.mode===mode){ state.playableQuestions = state.resumeState.questions; state.currentQuestionIndex = state.resumeState.index; state.view=mode; state.quizFinished=false; loadStateForIndex(state.currentQuestionIndex); render(); return; }
     
@@ -694,6 +712,7 @@ function prevQuestion() {
 }
 function goHome() {
     haptic('medium');
+    state.animState = 'idle';
     flushPendingSave();
     saveProgressToCloud();
     if (USE_AUTH) performAccessCheck();
